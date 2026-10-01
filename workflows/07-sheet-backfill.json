@@ -1,0 +1,389 @@
+{
+  "name": "Backfill — дозаполнение старых строк",
+  "nodes": [
+    {
+      "id": "9639fae6-7d7b-4143-a99d-1d8e9afc9a67",
+      "name": "Старт",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        304
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "8507d5f1-0d8c-4f06-bd79-6147f3a10a99",
+      "name": "Read Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        448,
+        304
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "read",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Встречи — Сводная"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "ea6a166a-138e-40eb-8b9a-891c0a314d0f",
+      "name": "Prep Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        304
+      ],
+      "parameters": {
+        "jsCode": "// LIMIT = 0 → все строки (полный перепрог)\nconst LIMIT = 0;\nconst rows = $input.all();\nconst out = [];\nfor (let i = 0; i < rows.length; i++) {\n  const r = rows[i].json || {};\n  const ffId = String(r['ID встречи (Fireflies)'] || '').trim();\n  if (!ffId) continue;\n  // ПЕРЕПРОГ ПО ВСЕМ: фильтр «только пустые» снят — перезаписываем все строки с transcriptId\n  const ffBody = { query: 'query Transcript($transcriptId: String!) { transcript(id: $transcriptId) { title date duration sentences { speaker_name text } } }', variables: { transcriptId: ffId } };\n  out.push({ json: {\n    row_number: r.row_number,\n    ffId: ffId,\n    existingManager: String(r['Менеджер'] || '').trim(),\n    existingContact: String(r['Имя контакта'] || '').trim(),\n    ffBody: ffBody\n  } });\n  if (LIMIT && out.length >= LIMIT) break;\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "ba4ad27e-6df1-4f6e-92fa-898c32ba3a81",
+      "name": "Fetch Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        864,
+        304
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.fireflies.ai/graphql",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.ffBody }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Fireflies API"
+        }
+      }
+    },
+    {
+      "id": "8b4546e8-6b42-4b2f-b73d-b511d148fd90",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1072,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const responses = $input.all();\nconst rows = $('Prep Rows').all();\nconst out = [];\nfor (let i = 0; i < responses.length; i++) {\n  const ft = responses[i].json || {};\n  const ctx = (rows[i] && rows[i].json) ? rows[i].json : {};\n  const data = (ft.data && ft.data.transcript) ? ft.data.transcript : (ft.transcript || {});\n  const sentences = (data && data.sentences) ? data.sentences : [];\n  if (!sentences.length) continue;\n  let transcriptText = '';\n  for (let j = 0; j < sentences.length; j++) { const s = sentences[j] || {}; transcriptText += (s.speaker_name || 'Спикер') + ': ' + (s.text || '') + '\\n'; }\n  const title = data.title || '';\n  const date = data.date || '';\n  const managers = [\n 'Анна (Соколова Анна / Анна / Аня)',\n 'Дмитрий (Орлов Дмитрий / Дмитрий / Дима)',\n 'Елена (Белова Елена / Елена / Лена)',\n 'Сергей (Новиков Сергей / Сергей / Серёжа)',\n 'Наталья (Кравцова Наталья / Наталья / Наташа)'\n];\n  const system = [\n    'Ты — ассистент, анализирующий транскрипт деловой встречи с клиентом на русском. Встреча уже классифицирована как целевая — переклассифицировать не нужно. Извлеки ТОЛЬКО указанные ниже поля.',\n    '',\n    'Менеджеры и руководители НАШЕЙ стороны и формы их имени: ' + managers.join('; ') + '.',\n    '',\n    'КАК ОПРЕДЕЛИТЬ manager и contact_name:',\n    '- НАШ менеджер — тот, кто ПРОВОДИТ встречу и ЗАДАЁТ вопросы (про бизнес собеседника, про сотрудничество с нами, обратную связь, пожелания). КЛИЕНТ — тот, ЧЕЙ бизнес обсуждают и кто ОТВЕЧАЕТ на эти вопросы.',\n    '- Основной источник имени менеджера — поле «Текущий Менеджер в таблице» (дано ниже). По умолчанию верни именно его (нормализовав к канону). Меняй его ТОЛЬКО если из транскрипта однозначно следует, что встречу вёл другой человек из списка наших менеджеров.',\n    '- КОЛЛИЗИЯ ИМЁН (важно): если КЛИЕНТА зовут так же, как кого-то из списка наших менеджеров (например, клиента тоже зовут Анна, Дмитрий, Сергей и т.п.) — он ВСЁ РАВНО КЛИЕНТ, а не наш менеджер. Само по себе совпадение имени НЕ делает участника нашим менеджером. Имя из списка засчитывается менеджером только если этот человек задаёт вопросы.',\n    '- manager — каноническое полное имя менеджера (первое слово до скобок из списка), несколько через запятую если наших на встрече несколько. contact_name — имя(имена) со стороны КЛИЕНТА, несколько через запятую. Имена не выдумывай; если не названо — оставь как в текущем значении строки или пусто.',\n    '',\n    'Поля для извлечения:',\n    '- q8_wishes — что клиент сам озвучил или попросил: новые услуги/инструменты у нас; изменения в работе (сроки, формат, отчётность); любые явные пожелания и просьбы.',\n    '- company_summary — сводка о компании клиента: чем занимается, масштаб, направления, ситуация в бизнесе.',\n    '- growth_opportunities — аналитический срез про клиента и его бизнес: куда движется, намерения и тренды, спящий потенциал, и зоны, где МЫ могли бы вырасти ВНЕ текущих услуг (наши услуги: перечислите свои услуги). Это твой вывод из контекста, НЕ дублируй сюда прямые просьбы клиента (они в q8_wishes). Помечай: сказано прямо или это предположение.',\n    '',\n    'Верни СТРОГО валидный JSON без markdown по схеме:',\n    '{ \"manager\":\"\", \"contact_name\":\"\", \"q8_wishes\":\"\", \"company_summary\":\"\", \"growth_opportunities\":\"\" }'\n  ].join('\\n');\n  const user = 'Заголовок встречи: ' + title + '\\nДата: ' + date + '\\nТекущий Менеджер в таблице (это НАШ менеджер — основной якорь): ' + (ctx.existingManager || '—') + '\\nТекущий Контакт в таблице (сторона клиента): ' + (ctx.existingContact || '—') + '\\n\\nТранскрипт:\\n' + transcriptText;\n  const openaiBody = { model: 'gpt-5.4', messages: [ { role: 'system', content: system }, { role: 'user', content: user } ], response_format: { type: 'json_object' } };\n  out.push({ json: { row_number: ctx.row_number, ffId: ctx.ffId, openaiBody: openaiBody } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "e5589f44-f390-4f4e-a6df-8e93332c05c2",
+      "name": "Extract (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1280,
+        304
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.openaiBody }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "id": "9df21a91-70f5-4698-a858-cce3b06086ce",
+      "name": "Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1488,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const responses = $input.all();\nconst bp = $('Build Prompt').all();\nconst MGR = [\n {full:'Анна',    keys:['анна','аня','соколова']},\n {full:'Дмитрий', keys:['дмитрий','дима','орлов']},\n {full:'Елена',   keys:['елена','лена','белова']},\n {full:'Сергей',  keys:['сергей','сережа','новиков']},\n {full:'Наталья', keys:['наталья','наташа','кравцова']}\n];\nconst normMgr = (raw) => {\n  if (!raw) return '';\n  const res = [];\n  String(raw).split(',').forEach((part) => {\n    const words = part.toLowerCase().replace(/ё/g,'е').split(/[^а-я]+/).filter(Boolean);\n    let canon = '';\n    for (const m of MGR) { if (m.keys.some((k) => words.includes(k))) { canon = m.full; break; } }\n    const val = canon || part.trim();\n    if (val && res.indexOf(val) === -1) res.push(val);\n  });\n  return res.join(', ');\n};\nconst out = [];\nfor (let i = 0; i < responses.length; i++) {\n  const resp = responses[i].json || {};\n  const ctx = (bp[i] && bp[i].json) ? bp[i].json : {};\n  let content = '';\n  try { content = resp.choices[0].message.content || ''; } catch (e) { content = ''; }\n  content = content.replace(/```json/gi,'').replace(/```/g,'').trim();\n  let parsed = null;\n  try { parsed = JSON.parse(content); } catch (e) { parsed = null; }\n  if (!parsed) continue;\n  const upd = { row_number: ctx.row_number };\n  if (parsed.manager) upd['Менеджер'] = normMgr(parsed.manager);\n  if (parsed.contact_name) upd['Имя контакта'] = parsed.contact_name;\n  upd['Предложения и пожелания клиента'] = parsed.q8_wishes || '';\n  upd['О компании'] = parsed.company_summary || '';\n  upd['Перспективы и зоны роста'] = parsed.growth_opportunities || '';\n  out.push({ json: upd });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "30bf01bc-186a-4c5e-b57d-13af9e0a7a58",
+      "name": "Update Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1696,
+        304
+      ],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Встречи — Сводная"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": [
+            "row_number"
+          ],
+          "value": {},
+          "schema": []
+        },
+        "options": {
+          "handlingExtraData": "insertInNewColumn"
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "bd679f75-17f3-4253-b42a-e3ed0a895715",
+      "name": "Seed Prep",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const rows = $('Read Sheet').all();\nconst out = [];\nconst seen = {};\nfor (let i = 0; i < rows.length; i++) {\n  const r = rows[i].json || {};\n  const ffId = String(r['ID встречи (Fireflies)'] || '').trim();\n  if (!ffId || seen[ffId]) continue;\n  seen[ffId] = true;\n  const ref = (String(r['Менеджер'] || '').trim() + ' - ' + String(r['Дата встречи'] || '').trim());\n  out.push({ json: { ffId: ffId, refName: ref } });\n}\nreturn out;"
+      }
+    },
+    {
+      "id": "8a4976f2-9332-49fb-aba5-17b84745cb3b",
+      "name": "Журнал · засев",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        2112,
+        304
+      ],
+      "parameters": {
+        "resource": "row",
+        "operation": "upsert",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_DATA_TABLE_ID"
+        },
+        "matchType": "allConditions",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "dedup_key",
+              "condition": "eq",
+              "keyValue": "={{ $json.ffId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "dedup_key": "={{ $json.ffId }}",
+            "source": "seed",
+            "ref_name": "={{ $json.refName }}",
+            "processed_at": "={{ $now.toISO() }}"
+          }
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f5802a91-ce8b-480f-a33d-9af0fb9c8c0e",
+      "name": "Send a text message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        2320,
+        304
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "sendMessage",
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '✅ Backfill завершён\\nОбновлено строк: ' + $('Parse').all().length + '\\nВзято в обработку: ' + $('Prep Rows').all().length + '\\nБез транскрипта (пропущено): ' + ($('Prep Rows').all().length - $('Build Prompt').all().length) + '\\nЗасеяно в журнал: ' + $('Seed Prep').all().length }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      },
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "Старт": {
+      "main": [
+        [
+          {
+            "node": "Read Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Sheet": {
+      "main": [
+        [
+          {
+            "node": "Prep Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Rows": {
+      "main": [
+        [
+          {
+            "node": "Fetch Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Transcript": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Extract (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse": {
+      "main": [
+        [
+          {
+            "node": "Update Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Row": {
+      "main": [
+        [
+          {
+            "node": "Seed Prep",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Seed Prep": {
+      "main": [
+        [
+          {
+            "node": "Журнал · засев",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Журнал · засев": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "tags": []
+}

@@ -1,0 +1,658 @@
+{
+  "name": "Zoom 2 — Обработка транскрипта",
+  "nodes": [
+    {
+      "id": "4536c214-91ec-48d4-898d-53c518fdf060",
+      "name": "Fireflies Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        304
+      ],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "fireflies-transcript",
+        "options": {}
+      }
+    },
+    {
+      "id": "8fbafbca-c4fa-4ec4-aaf4-e3ae4cad0b0f",
+      "name": "Prep FF Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const body = ($input.first().json.body) || {};\nconst meetingId = body.meeting_id || body.meetingId || '';\nconst crid = body.client_reference_id || body.clientReferenceId || '';\nconst eventType = body.event || body.eventType || '';\n// Гейт: Drive-транскрипты обрабатывает отдельный воркфлоу — сюда их не пускаем\nif (crid.indexOf('drive:') === 0) { return []; }\nconst ffBody = { query: 'query Transcript($transcriptId: String!) { transcript(id: $transcriptId) { title date duration sentences { speaker_name text } } }', variables: { transcriptId: meetingId } };\nreturn [{ json: { meetingId: meetingId, clientReferenceId: crid, eventType: eventType, ffBody: ffBody } }];"
+      }
+    },
+    {
+      "id": "a3d40c86-9122-4cf6-a449-efdb3a1efa66",
+      "name": "Fetch Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        656,
+        304
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.fireflies.ai/graphql",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.ffBody }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Fireflies API"
+        }
+      }
+    },
+    {
+      "id": "10385a25-d943-4f43-9250-22696cd8a105",
+      "name": "Prep Zoom",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        864,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const crid = ($('Prep FF Query').item.json.clientReferenceId) || '';\nlet zoomUrl = '';\nif (crid) { let enc = encodeURIComponent(crid); if (crid.indexOf('/') !== -1 || crid.indexOf('+') !== -1) { enc = encodeURIComponent(enc); } zoomUrl = 'https://api.zoom.us/v2/past_meetings/' + enc + '/participants?page_size=100'; }\nreturn [{ json: { crid: crid, zoomUrl: zoomUrl, hasUuid: !!crid } }];"
+      }
+    },
+    {
+      "id": "9e21e812-8b55-4d0e-9016-0156dd339fe7",
+      "name": "Fetch Participants",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1072,
+        304
+      ],
+      "parameters": {
+        "url": "={{ $json.zoomUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Zoom"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "e7eeac27-4d8f-4e7d-8f51-a5895260c9c1",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1280,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const ft = $('Fetch Transcript').item.json;\nif (ft && ft.errors && ft.errors.length) { throw new Error('Fireflies error: ' + (ft.errors[0].message || 'unknown') + ' (transcriptId=' + (($('Prep FF Query').item.json.meetingId) || '') + ')'); }\nconst data = (ft.data && ft.data.transcript) ? ft.data.transcript : (ft.transcript || {});\nconst sentences = data.sentences || [];\nif (!sentences.length) { throw new Error('Пустой транскрипт от Fireflies (transcriptId=' + (($('Prep FF Query').item.json.meetingId) || '') + '). Проверь meeting_id/client_reference_id во входящем вебхуке.'); }\nlet transcriptText = '';\nfor (let i = 0; i < sentences.length; i++) { const s = sentences[i] || {}; transcriptText += (s.speaker_name || 'Спикер') + ': ' + (s.text || '') + '\\n'; }\nconst title = data.title || '';\nconst date = data.date || '';\nconst duration = (data.duration != null) ? data.duration : '';\nconst zoomResp = $input.first().json;\nlet names = [];\ntry { const ps = (zoomResp && zoomResp.participants) ? zoomResp.participants : []; for (let i = 0; i < ps.length; i++) { const p = ps[i]; if (p && p.name && names.indexOf(p.name) === -1) names.push(String(p.name).trim()); } } catch (e) {}\nconst namesHint = names.length ? ('\\n\\nПодсказка — участники встречи по данным Zoom: ' + names.join(', ') + '. Используй эти имена, чтобы точнее определить менеджера(ов) и контакт(ы) клиента. Имена могут быть неполными или «Гость» — тогда опирайся на транскрипт и список менеджеров. Не выдумывай.') : '';\n// === НАСТРОЙКА: впишите свой тип встречи, услуги и вопросы ===\nconst MEETING_TYPE = 'обзорная встреча с клиентом';\nconst MEETING_TYPE_DESC = 'регулярная встреча про удовлетворённость и развитие сотрудничества';\nconst OUR_SERVICES = 'перечислите свои услуги';\n// key — ключ в ответе модели, column — колонка таблицы, text — формулировка и цель\nconst QUESTIONS = [\n { key: 'q1_satisfaction', column: 'Оценка и удовлетворённость', text: 'Оценка сотрудничества 1–10, чем доволен и что беспокоит. Цель: лояльность и риски оттока.' },\n { key: 'q2_business_changes', column: 'Что изменилось в бизнесе', text: 'Что изменилось в бизнесе клиента за последнее время, как на него влияет рынок. Цель: контекст и финансовое состояние.' },\n { key: 'q3_goals', column: 'Цели и приоритеты', text: 'Цели и приоритеты клиента на ближайшие месяцы. Цель: куда движется клиент.' },\n { key: 'q4_alternatives', column: 'Альтернативные решения / конкуренты', text: 'Какие альтернативы, других подрядчиков или инструменты использует. Цель: конкуренты.' },\n { key: 'q5_service_usage', column: 'Использование наших услуг', text: 'Какими нашими услугами пользуется и насколько полно. Цель: охват.' },\n { key: 'q6_blockers', column: 'Что мешает', text: 'Что мешает получать больше пользы от работы с нами. Цель: препятствия и точки улучшения.' },\n { key: 'q7_untapped', column: 'Задачи у других подрядчиков', text: 'Задачи и проекты, которые клиент решает сам или с другими подрядчиками, и почему. Цель: упущенное.' },\n { key: 'q8_wishes', column: 'Предложения и пожелания клиента', text: 'Что клиент сам озвучил или попросил: новые услуги/инструменты у нас; изменения в работе (сроки, формат, отчётность); любые явные пожелания и просьбы. Цель: прямые запросы и пожелания клиента.' },\n { key: 'q9_expansion_terms', column: 'Условия расширения', text: 'При каких условиях готов расширить сотрудничество. Цель: условия роста.' },\n { key: 'q10_referrals', column: 'Партнёры для рекомендации', text: 'Партнёры или знакомые, которым мог бы нас порекомендовать. Цель: рефералы.' }\n];\n// ==============================================================\nconst managers = [\n 'Анна (Соколова Анна / Анна / Аня)',\n 'Дмитрий (Орлов Дмитрий / Дмитрий / Дима)',\n 'Елена (Белова Елена / Елена / Лена)',\n 'Сергей (Новиков Сергей / Сергей / Серёжа)',\n 'Наталья (Кравцова Наталья / Наталья / Наташа)'\n];\nconst system = [\n 'Ты — ассистент, который анализирует транскрипт деловой встречи на русском языке.',\n 'Сначала определи, целевая ли это встреча: ' + MEETING_TYPE + ' (' + MEETING_TYPE_DESC + ') — или содержит её элементы. Этот же Zoom используется и для планёрок, онбординга и прочего — такие встречи нам не нужны.',\n 'Если встреча целевая (полностью или частично) — извлеки ответы по ' + QUESTIONS.length + ' вопросам и доп. блоки.',\n '',\n 'ВАЖНО про гибкость:',\n '- Ищи ответы по СМЫСЛУ по всему транскрипту, а не в ожидаемом месте.',\n '- Ответ может быть рассыпан по нескольким репликам — собери воедино.',\n '- Клиент может ответить, не дожидаясь прямого вопроса — это валидный ответ.',\n '- Если есть только косвенные признаки — извлеки суть, не выдумывай.',\n '- Различай реальный ответ и тему, упомянутую вскользь без содержания (тогда пусто).',\n '',\n 'Менеджеры и руководители (наша сторона) и допустимые формы их имени: ' + managers.join('; ') + '.',\n 'КАК ОПРЕДЕЛИТЬ manager и contact_name: НАШ менеджер — тот, кто ПРОВОДИТ встречу и ЗАДАЁТ вопросы (про бизнес собеседника, удовлетворённость, развитие сотрудничества). КЛИЕНТ — тот, ЧЕЙ бизнес обсуждают и кто ОТВЕЧАЕТ. Опирайся на подсказку об участниках выше и на роли в диалоге, а не только на совпадение имени.',\n 'КОЛЛИЗИЯ ИМЁН: если КЛИЕНТА зовут так же, как кого-то из нашего списка (например, клиента тоже зовут Анна, Дмитрий, Сергей и т.п.) — он ВСЁ РАВНО КЛИЕНТ. Само совпадение имени НЕ делает участника нашим менеджером; засчитывай менеджером только того, кто реально ведёт встречу и задаёт вопросы.',\n 'В поле manager выводи каноническое полное имя менеджера (первое слово до скобок), несколько через запятую если наших несколько. Остальные участники — contact_name (через запятую). Имена не выдумывай; если не названо — пусто.',\n '',\n 'Вопросы (ключ — формулировка — цель):',\n ...QUESTIONS.map((q) => q.key + ' — ' + q.text),\n '',\n 'Дополнительно:',\n '- agreements — договорённости/next steps;',\n '- company_summary — сводка о компании клиента из диалога: чем занимается, масштаб, направления, ситуация в бизнесе;',\n '- growth_opportunities — аналитический срез про самого клиента и его бизнес: куда движется, намерения и тренды, спящий потенциал, и зоны, где МЫ могли бы вырасти ВНЕ текущих услуг (наши основные услуги: ' + OUR_SERVICES + '). Это твой вывод из контекста, а не прямая просьба клиента. НЕ дублируй сюда то, что клиент явно попросил — это идёт в q8_wishes. Помечай: сказано прямо или это твоё предположение.',\n '',\n 'Верни СТРОГО валидный JSON без markdown по схеме:',\n '{ \"is_target_meeting\": true, \"target_signal\": \"full|partial|none\", \"reason\": \"\", \"contact_name\": \"\", \"manager\": \"\", \"answers\": { ' + QUESTIONS.map((q) => '\"' + q.key + '\":\"\"').join(', ') + ' }, \"agreements\":\"\", \"company_summary\":\"\", \"growth_opportunities\":\"\" }',\n 'Если по вопросу нет ответа — пустая строка. Если встреча не целевая — is_target_meeting:false и target_signal:\"none\".'\n].join('\\n');\nconst user = 'Заголовок встречи: ' + title + '\\nДата: ' + date + namesHint + '\\n\\nТранскрипт:\\n' + transcriptText;\nconst openaiBody = { model: 'gpt-5.4', messages: [ { role: 'system', content: system }, { role: 'user', content: user } ], response_format: { type: 'json_object' } };\nreturn [{ json: { meetingId: ($('Prep FF Query').item.json.meetingId) || '', date: date, duration: duration, openaiBody: openaiBody, questions: QUESTIONS.map((q) => ({ key: q.key, column: q.column })) } }];"
+      }
+    },
+    {
+      "id": "1795772b-a7d3-4196-8150-1f7c1b97cc51",
+      "name": "Extract (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1488,
+        304
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.openaiBody }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "id": "eec95e06-4017-4919-bca6-ca9fca9a742e",
+      "name": "Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1696,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\n// Сбой модели — это ошибка, а не «встреча не того типа»: бросаем исключение,\n// чтобы сработал общий обработчик ошибок и встреча не пропала молча.\nif (resp.error) { throw new Error('Модель вернула ошибку: ' + (resp.error.message || JSON.stringify(resp.error))); }\nif (!resp.choices || !resp.choices[0] || !resp.choices[0].message) { throw new Error('В ответе модели нет choices: ' + JSON.stringify(resp).slice(0, 300)); }\nlet content = resp.choices[0].message.content || '';\ncontent = content.replace(/```json/gi, '').replace(/```/g, '').trim();\nlet parsed = null;\ntry { parsed = JSON.parse(content); } catch (e) { throw new Error('Ответ модели не разбирается как JSON: ' + content.slice(0, 300)); }\nif (!parsed || typeof parsed.is_target_meeting !== 'boolean') { throw new Error('В ответе модели нет поля is_target_meeting: ' + content.slice(0, 300)); }\nif (!parsed || parsed.is_target_meeting !== true) { return []; }\nconst bp = $('Build Prompt').item.json;\nconst meetingId = bp.meetingId || '';\nconst dateMs = bp.date || 0;\nconst p = (n) => String(n).padStart(2, '0');\nlet dateStr = '';\nif (dateMs) { try { const d = new Date(Number(dateMs) + 3*3600*1000); dateStr = d.getUTCFullYear() + '-' + p(d.getUTCMonth()+1) + '-' + p(d.getUTCDate()); } catch (e) { dateStr = ''; } }\nlet durMin = '';\nif (bp.duration !== undefined && bp.duration !== null && bp.duration !== '') { const dv = Number(bp.duration); if (!isNaN(dv)) durMin = Math.round(dv); }\nconst MGR = [\n {full:'Анна',    keys:['анна','аня','соколова']},\n {full:'Дмитрий', keys:['дмитрий','дима','орлов']},\n {full:'Елена',   keys:['елена','лена','белова']},\n {full:'Сергей',  keys:['сергей','сережа','новиков']},\n {full:'Наталья', keys:['наталья','наташа','кравцова']}\n];\nconst normMgr = (raw) => {\n  if (!raw) return '';\n  const out = [];\n  String(raw).split(',').forEach((part) => {\n    const words = part.toLowerCase().replace(/ё/g, 'е').split(/[^а-я]+/).filter(Boolean);\n    let canon = '';\n    for (const m of MGR) { if (m.keys.some((k) => words.includes(k))) { canon = m.full; break; } }\n    const val = canon || part.trim();\n    if (val && out.indexOf(val) === -1) out.push(val);\n  });\n  return out.join(', ');\n};\nconst a = parsed.answers || {};\nconst row = {\n  'Дата встречи': dateStr,\n  'Клиент': '',\n  'Имя контакта': parsed.contact_name || '',\n  'Менеджер': normMgr(parsed.manager),\n  'Длительность (мин)': durMin,\n  ...Object.fromEntries((bp.questions || []).map((q) => [q.column, a[q.key] || ''])),\n  'Договорённости / Next Steps': parsed.agreements || '',\n  'О компании': parsed.company_summary || '',\n  'Перспективы и зоны роста': parsed.growth_opportunities || '',\n  'ID встречи (Fireflies)': meetingId\n};\nreturn [{ json: row }];"
+      }
+    },
+    {
+      "id": "58e34b1a-123a-4731-8243-5483f6aca69a",
+      "name": "Build Folder Name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1904,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const manager = ($('Parse').item.json['Менеджер']) || '';\nconst dateMs = ($('Build Prompt').item.json.date) || 0;\nconst p = (n) => String(n).padStart(2, '0');\nlet datePart = ''; let timeStr = '';\nif (dateMs) { try { const d = new Date(Number(dateMs) + 3*3600*1000); datePart = p(d.getUTCDate()) + '-' + p(d.getUTCMonth()+1) + '-' + d.getUTCFullYear(); timeStr = p(d.getUTCHours()) + '-' + p(d.getUTCMinutes()); } catch (e) {} }\nconst base = manager ? manager : 'Без менеджера';\nconst folderName = base + ' - ' + (datePart || 'без даты') + (timeStr ? (' ' + timeStr) : '');\nreturn [{ json: { folderName: folderName } }];"
+      }
+    },
+    {
+      "id": "f4dac5b9-5932-43b6-9803-002138b17545",
+      "name": "Create Meeting Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2112,
+        304
+      ],
+      "parameters": {
+        "resource": "folder",
+        "name": "={{ $json.folderName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_MEETINGS_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "5ef4be29-e684-4999-98df-4b0762802242",
+      "name": "Build Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2320,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const row = Object.assign({}, $('Parse').item.json);\nconst created = $input.first().json || {};\nconst fid = created.id || '';\nrow['Папка встречи'] = fid ? ('https://drive.google.com/drive/folders/' + fid) : '';\nreturn [{ json: row }];"
+      }
+    },
+    {
+      "id": "9cb0b244-c781-4594-8b20-10385ccab2b4",
+      "name": "Append Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2528,
+        304
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Встречи — Сводная"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "handlingExtraData": "insertInNewColumn",
+          "useAppend": true
+        }
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "01b21ffc-c71b-4102-b107-9632992fceda",
+      "name": "Build Transcript File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2736,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const ft = $('Fetch Transcript').item.json;\nconst data = (ft.data && ft.data.transcript) ? ft.data.transcript : (ft.transcript || {});\nconst sentences = data.sentences || [];\nconst title = data.title || 'Транскрипт';\nlet text = title + '\\n\\n';\nfor (let i = 0; i < sentences.length; i++) { const s = sentences[i] || {}; text += (s.speaker_name || 'Спикер') + ': ' + (s.text || '') + '\\n'; }\nconst folderId = ($('Create Meeting Folder').item.json.id) || '';\nreturn [{ json: { transcriptText: text, transcriptName: 'Транскрипт (Fireflies).txt', folderId: folderId } }];"
+      }
+    },
+    {
+      "id": "ceefbbb8-f07a-456b-b7ac-4f29ded48759",
+      "name": "Upload Transcript",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2944,
+        304
+      ],
+      "parameters": {
+        "operation": "createFromText",
+        "content": "={{ $json.transcriptText }}",
+        "name": "={{ $json.transcriptName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.folderId }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "aafb14f5-e390-430d-9538-e45a8a36e6b7",
+      "name": "Prep Recordings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3152,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const crid = ($('Prep Zoom').item.json.crid) || '';\nlet recUrl = '';\nif (crid) { let enc = encodeURIComponent(crid); if (crid.indexOf('/') !== -1 || crid.indexOf('+') !== -1) { enc = encodeURIComponent(enc); } recUrl = 'https://api.zoom.us/v2/meetings/' + enc + '/recordings'; }\nconst folderId = ($('Create Meeting Folder').item.json.id) || '';\nreturn [{ json: { recUrl: recUrl, folderId: folderId } }];"
+      }
+    },
+    {
+      "id": "c67f704b-48a4-4e9f-89c5-96d989678e89",
+      "name": "Fetch Recordings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3360,
+        304
+      ],
+      "parameters": {
+        "url": "={{ $json.recUrl }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Zoom"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "47fec5e6-b17b-46c1-b5f1-013636090b28",
+      "name": "Split Files",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3568,
+        304
+      ],
+      "parameters": {
+        "jsCode": "const resp = $input.first().json || {};\nconst files = resp.recording_files || [];\nconst folderId = ($('Create Meeting Folder').item.json.id) || '';\nlet bestMp4 = null, bestM4a = null;\nfor (let i = 0; i < files.length; i++) {\n  const f = files[i]; if (!f || !f.file_type) continue;\n  const t = String(f.file_type).toUpperCase(); const sz = Number(f.file_size || 0);\n  if (t === 'MP4') { if (!bestMp4 || sz > Number(bestMp4.file_size || 0)) bestMp4 = f; }\n  else if (t === 'M4A') { if (!bestM4a || sz > Number(bestM4a.file_size || 0)) bestM4a = f; }\n}\nconst out = [];\nif (bestMp4 && bestMp4.download_url) out.push({ json: { download_url: bestMp4.download_url, fileName: 'Видеозапись.mp4', folderId: folderId } });\nif (bestM4a && bestM4a.download_url) out.push({ json: { download_url: bestM4a.download_url, fileName: 'Аудио.m4a', folderId: folderId } });\nreturn out;"
+      }
+    },
+    {
+      "id": "885e967e-d62c-4e64-b3f0-efb8be283b12",
+      "name": "Download File",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        3776,
+        304
+      ],
+      "parameters": {
+        "url": "={{ $json.download_url }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "oAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Zoom"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "7630ea6c-a8b9-4711-a1a9-52ca163b734c",
+      "name": "Upload Recording",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3984,
+        304
+      ],
+      "parameters": {
+        "name": "={{ $('Split Files').item.json.fileName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Split Files').item.json.folderId }}"
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "id": "18af4fc7-1315-42ab-b511-2046fc7e6110",
+      "name": "Send a text message",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        4192,
+        304
+      ],
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ '✅ Zoom-встреча обработана\\n' + 'Менеджер: ' + ($('Build Row').item.json['Менеджер'] || '—') + '\\n' + 'Контакт: ' + ($('Build Row').item.json['Имя контакта'] || '—') + '\\n' + ($('Build Row').item.json['Дата встречи'] || '') + ' · ' + ($('Build Row').item.json['Длительность (мин)'] || '') + ' мин\\n' + 'Папка: ' + ($('Build Row').item.json['Папка встречи'] || '') }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      },
+      "executeOnce": true
+    }
+  ],
+  "connections": {
+    "Fireflies Webhook": {
+      "main": [
+        [
+          {
+            "node": "Prep FF Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep FF Query": {
+      "main": [
+        [
+          {
+            "node": "Fetch Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Transcript": {
+      "main": [
+        [
+          {
+            "node": "Prep Zoom",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Zoom": {
+      "main": [
+        [
+          {
+            "node": "Fetch Participants",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Participants": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Extract (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse": {
+      "main": [
+        [
+          {
+            "node": "Build Folder Name",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Folder Name": {
+      "main": [
+        [
+          {
+            "node": "Create Meeting Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Meeting Folder": {
+      "main": [
+        [
+          {
+            "node": "Build Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Row": {
+      "main": [
+        [
+          {
+            "node": "Append Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Row": {
+      "main": [
+        [
+          {
+            "node": "Build Transcript File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Transcript File": {
+      "main": [
+        [
+          {
+            "node": "Upload Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Transcript": {
+      "main": [
+        [
+          {
+            "node": "Prep Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Recordings": {
+      "main": [
+        [
+          {
+            "node": "Fetch Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Recordings": {
+      "main": [
+        [
+          {
+            "node": "Split Files",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Files": {
+      "main": [
+        [
+          {
+            "node": "Download File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download File": {
+      "main": [
+        [
+          {
+            "node": "Upload Recording",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Recording": {
+      "main": [
+        [
+          {
+            "node": "Send a text message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "errorWorkflow": "YOUR_ERROR_WORKFLOW_ID"
+  },
+  "pinData": {},
+  "tags": []
+}

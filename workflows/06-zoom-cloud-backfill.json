@@ -1,0 +1,271 @@
+{
+  "name": "Zoom Backfill — Облако → Fireflies",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "295e9954-a46f-4474-b035-ef8824d3ceb8",
+      "name": "Старт",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        240,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ACCOUNT_ID = 'YOUR_ZOOM_ACCOUNT_ID';\nconst USER_ID = 'zoom-user@example.com';\nreturn [{ json: { from: '2026-01-01', to: '2026-01-31', accountId: ACCOUNT_ID, userId: USER_ID } }];"
+      },
+      "id": "2eaac803-ba7c-4f56-8a3e-237f55c9df74",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://zoom.us/oauth/token",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "grant_type",
+              "value": "account_credentials"
+            },
+            {
+              "name": "account_id",
+              "value": "={{ $json.accountId }}"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a2b599fb-9620-4d7a-982e-2fcffdded26d",
+      "name": "Get Zoom Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        688,
+        304
+      ],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Zoom S2S Basic"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.zoom.us/v2/users/{{ $(\"Config\").item.json.userId }}/recordings",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "from",
+              "value": "={{ $(\"Config\").item.json.from }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $(\"Config\").item.json.to }}"
+            },
+            {
+              "name": "page_size",
+              "value": "300"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $(\"Get Zoom Token\").item.json.access_token }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "bce8022b-9e16-4a32-8b4c-22cd55155423",
+      "name": "List Recordings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        912,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $('List Recordings').first().json;\nif (!resp || !Array.isArray(resp.meetings)) {\n  throw new Error('Zoom recordings: нет поля meetings (вероятно 401 / нет scope). Ответ: ' + JSON.stringify(resp).slice(0, 800));\n}\nconst token = ($('Get Zoom Token').first().json.access_token) || '';\nif (!token) { throw new Error('Zoom: пустой access_token'); }\nconst cfg = $('Config').first().json;\nconst from = cfg.from, to = cfg.to;\nconst meetings = resp.meetings;\nconst out = [];\nconst skipped = [];\nfor (const m of meetings) {\n  const startTime = m.start_time || '';\n  const day = startTime.slice(0, 10);\n  if (from && day && day < from) continue;\n  if (to && day && day > to) continue;\n  const files = m.recording_files || [];\n  let audio = files.find(function(f){ return f.file_type === 'M4A'; });\n  if (!audio) audio = files.find(function(f){ return (f.recording_type || '').indexOf('audio') >= 0; });\n  if (!audio || !audio.download_url) {\n    skipped.push((m.topic || 'без названия') + ' (' + day + ')');\n    continue;\n  }\n  const sep = audio.download_url.indexOf('?') >= 0 ? '&' : '?';\n  const audioUrl = audio.download_url + sep + 'access_token=' + token;\n  const title = (m.topic || 'Zoom Meeting') + ' — ' + day;\n  const firefliesBody = {\n    query: 'mutation UploadAudio($input: AudioUploadInput) { uploadAudio(input: $input) { success title message } }',\n    variables: { input: { url: audioUrl, title: title, custom_language: 'ru', client_reference_id: (m.uuid || '') } }\n  };\n  out.push({ json: { uuid: m.uuid || '', topic: m.topic || '', day: day, title: title, audioFound: true, firefliesBody: firefliesBody } });\n}\nconst meta = { total: meetings.length, withAudio: out.length, skipped: skipped };\nfor (const it of out) { it.json.meta = meta; }\nreturn out;"
+      },
+      "id": "318fed48-a9a8-4694-a2df-b59fafe5d9a3",
+      "name": "Build Uploads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        304
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.fireflies.ai/graphql",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.firefliesBody }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 2000
+            }
+          },
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "6520e077-4707-4fab-8fbc-68ef0440691e",
+      "name": "Fireflies Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1344,
+        304
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Fireflies API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=🎬 Zoom-прогон (облако) → Fireflies\nПериод: {{ $(\"Config\").item.json.from }} … {{ $(\"Config\").item.json.to }}\nНайдено встреч: {{ $(\"Build Uploads\").first().json.meta.total }}\nЗалито (есть M4A): {{ $(\"Build Uploads\").first().json.meta.withAudio }}\nПропущено без M4A: {{ $(\"Build Uploads\").first().json.meta.skipped.length }}{{ $(\"Build Uploads\").first().json.meta.skipped.length ? (\"\\nБез M4A:\\n• \" + $(\"Build Uploads\").first().json.meta.skipped.join(\"\\n• \")) : \"\" }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "91dbc0ec-1f37-479f-8bbb-42f02f518620",
+      "name": "Telegram Summary",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1568,
+        304
+      ],
+      "executeOnce": true,
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Старт": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Get Zoom Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Zoom Token": {
+      "main": [
+        [
+          {
+            "node": "List Recordings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Recordings": {
+      "main": [
+        [
+          {
+            "node": "Build Uploads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Uploads": {
+      "main": [
+        [
+          {
+            "node": "Fireflies Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fireflies Upload": {
+      "main": [
+        [
+          {
+            "node": "Telegram Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "pinData": {},
+  "tags": []
+}

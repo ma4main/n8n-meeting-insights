@@ -1,0 +1,851 @@
+{
+  "name": "Drive — Инбокс → Fireflies → Обработка",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "49c9aa91-3cbc-4012-bc83-2f6adc78fcc0",
+      "name": "Каждую минуту",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        240,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "fileFolder",
+        "searchMethod": "query",
+        "queryString": "'YOUR_INBOX_FOLDER_ID' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'",
+        "returnAll": true,
+        "filter": {
+          "driveId": {
+            "__rl": true,
+            "mode": "id",
+            "value": "YOUR_SHARED_DRIVE_ID"
+          }
+        },
+        "options": {
+          "fields": [
+            "id",
+            "name"
+          ]
+        }
+      },
+      "id": "7672dde7-f202-45c7-8e67-9336009ace2d",
+      "name": "List Inbox",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        448,
+        208
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const it = $input.item.json || {};\nconst fileId = it.id || '';\nconst fileName = it.name || '';\nconst title = fileName.replace(/\\.[^.]+$/, '');\nconst downloadUrl = 'https://drive.google.com/uc?export=download&id=' + fileId + '&confirm=t';\nconst webhookUrl = 'https://n8n.example.com/webhook/fireflies-drive-transcript';\nconst ffBody = { query: 'mutation($input: AudioUploadInput) { uploadAudio(input: $input) { success title message } }', variables: { input: { url: downloadUrl, title: title, webhook: webhookUrl, client_reference_id: 'drive:' + fileId } } };\nreturn { json: { fileId: fileId, fileName: fileName, title: title, downloadUrl: downloadUrl, ffBody: ffBody } };"
+      },
+      "id": "9bd393c3-f16e-4158-a5c8-cdcb23c1f050",
+      "name": "Prep Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prep Upload').item.json.fileId }}"
+        },
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_PROCESSING_FOLDER_ID"
+        }
+      },
+      "id": "d27c08f4-9ada-4c5a-9e27-3c641e56e935",
+      "name": "Move → _processing",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        848,
+        208
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "share",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Prep Upload').item.json.fileId }}"
+        },
+        "permissionsUi": {
+          "permissionsValues": {
+            "role": "reader",
+            "type": "anyone"
+          }
+        },
+        "options": {}
+      },
+      "id": "a0eac83f-af15-43eb-9f02-e33f7e943e18",
+      "name": "Share Public",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1040,
+        208
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.fireflies.ai/graphql",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $('Prep Upload').item.json.ffBody }}",
+        "options": {}
+      },
+      "id": "286a3800-0865-4416-b15f-a84d6c00b4f5",
+      "name": "Fireflies Upload",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1248,
+        208
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Fireflies API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=📤 Drive · файл отправлен в Fireflies\nФайл: {{ $('Prep Upload').item.json.fileName || '—' }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "eb554473-6187-4a46-bdf4-391ef15d4849",
+      "name": "Telegram · ушло в Fireflies",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        208
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "fireflies-drive-transcript",
+        "options": {}
+      },
+      "id": "aa583ef0-e7cf-451f-bec9-e8882dc7ba30",
+      "name": "Fireflies Drive Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        240,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = ($input.first().json.body) || {};\nconst meetingId = body.meetingId || body.meeting_id || '';\nconst clientReferenceId = body.clientReferenceId || body.client_reference_id || '';\nconst eventType = body.eventType || body.event || '';\nconst ffBody = { query: 'query Transcript($transcriptId: String!) { transcript(id: $transcriptId) { title date duration sentences { speaker_name text } } }', variables: { transcriptId: meetingId } };\nreturn [{ json: { meetingId: meetingId, clientReferenceId: clientReferenceId, eventType: eventType, ffBody: ffBody } }];"
+      },
+      "id": "61ce44a7-e3b4-43d3-88b6-1d6790d0b4c0",
+      "name": "Prep FF Query",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        464,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.fireflies.ai/graphql",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.ffBody }}",
+        "options": {}
+      },
+      "id": "11ac0aa3-79b6-45dc-ad64-f8b6bcf6656c",
+      "name": "Fetch Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        688,
+        544
+      ],
+      "retryOnFail": true,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Fireflies API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ft = $('Fetch Transcript').item.json;\nif (ft && ft.errors && ft.errors.length) { throw new Error('Fireflies error: ' + (ft.errors[0].message || 'unknown') + ' (transcriptId=' + (($('Prep FF Query').item.json.meetingId) || '') + ')'); }\nconst data = (ft.data && ft.data.transcript) ? ft.data.transcript : (ft.transcript || {});\nconst sentences = data.sentences || [];\nif (!sentences.length) { throw new Error('Пустой транскрипт от Fireflies (transcriptId=' + (($('Prep FF Query').item.json.meetingId) || '') + '). Проверь client_reference_id / файл в инбоксе.'); }\nlet transcriptText = '';\nfor (let i = 0; i < sentences.length; i++) { const s = sentences[i] || {}; transcriptText += (s.speaker_name || 'Спикер') + ': ' + (s.text || '') + '\\n'; }\nconst title = data.title || '';\nconst ffDate = data.date || 0;\nconst duration = (data.duration != null) ? data.duration : '';\nlet managerFromFile = '';\nconst di = title.indexOf(' - ');\nif (di !== -1) managerFromFile = title.slice(0, di).trim();\nlet realDateMs = 0;\nconst dm = title.match(/(\\d{2})-(\\d{2})-(\\d{4})/);\nif (dm) { realDateMs = Date.UTC(Number(dm[3]), Number(dm[2]) - 1, Number(dm[1])); }\nif (!realDateMs) { realDateMs = Number(ffDate) || 0; }\nconst crid = ($('Prep FF Query').item.json.clientReferenceId) || '';\nconst fileId = (crid.indexOf('drive:') === 0) ? crid.slice(6) : crid;\nconst managerHint = managerFromFile ? ('\\n\\nПодсказка — по имени файла менеджер нашей стороны: ' + managerFromFile + '. Если это имя есть в списке менеджеров, считай его нашим менеджером. Контакт(ы) клиента определяй из транскрипта.') : '';\n// === НАСТРОЙКА: впишите свой тип встречи, услуги и вопросы ===\nconst MEETING_TYPE = 'обзорная встреча с клиентом';\nconst MEETING_TYPE_DESC = 'регулярная встреча про удовлетворённость и развитие сотрудничества';\nconst OUR_SERVICES = 'перечислите свои услуги';\n// key — ключ в ответе модели, column — колонка таблицы, text — формулировка и цель\nconst QUESTIONS = [\n { key: 'q1_satisfaction', column: 'Оценка и удовлетворённость', text: 'Оценка сотрудничества 1–10, чем доволен и что беспокоит. Цель: лояльность и риски оттока.' },\n { key: 'q2_business_changes', column: 'Что изменилось в бизнесе', text: 'Что изменилось в бизнесе клиента за последнее время, как на него влияет рынок. Цель: контекст и финансовое состояние.' },\n { key: 'q3_goals', column: 'Цели и приоритеты', text: 'Цели и приоритеты клиента на ближайшие месяцы. Цель: куда движется клиент.' },\n { key: 'q4_alternatives', column: 'Альтернативные решения / конкуренты', text: 'Какие альтернативы, других подрядчиков или инструменты использует. Цель: конкуренты.' },\n { key: 'q5_service_usage', column: 'Использование наших услуг', text: 'Какими нашими услугами пользуется и насколько полно. Цель: охват.' },\n { key: 'q6_blockers', column: 'Что мешает', text: 'Что мешает получать больше пользы от работы с нами. Цель: препятствия и точки улучшения.' },\n { key: 'q7_untapped', column: 'Задачи у других подрядчиков', text: 'Задачи и проекты, которые клиент решает сам или с другими подрядчиками, и почему. Цель: упущенное.' },\n { key: 'q8_wishes', column: 'Предложения и пожелания клиента', text: 'Что клиент сам озвучил или попросил: новые услуги/инструменты у нас; изменения в работе (сроки, формат, отчётность); любые явные пожелания и просьбы. Цель: прямые запросы и пожелания клиента.' },\n { key: 'q9_expansion_terms', column: 'Условия расширения', text: 'При каких условиях готов расширить сотрудничество. Цель: условия роста.' },\n { key: 'q10_referrals', column: 'Партнёры для рекомендации', text: 'Партнёры или знакомые, которым мог бы нас порекомендовать. Цель: рефералы.' }\n];\n// ==============================================================\nconst managers = [\n 'Анна (Соколова Анна / Анна / Аня)',\n 'Дмитрий (Орлов Дмитрий / Дмитрий / Дима)',\n 'Елена (Белова Елена / Елена / Лена)',\n 'Сергей (Новиков Сергей / Сергей / Серёжа)',\n 'Наталья (Кравцова Наталья / Наталья / Наташа)'\n];\nconst system = [\n 'Ты — ассистент, который анализирует транскрипт деловой встречи на русском языке.',\n 'Это запись, загруженная вручную (не из Zoom). В транскрипте спикеры обозначены как «Speaker 1/2» без имён — опирайся на содержание реплик и подсказку по имени файла.',\n 'Сначала определи, целевая ли это встреча: ' + MEETING_TYPE + ' (' + MEETING_TYPE_DESC + ') — или содержит её элементы. Бывают также планёрки, онбординг и прочее — такие встречи не целевые.',\n 'Если встреча целевая (полностью или частично) — извлеки ответы по ' + QUESTIONS.length + ' вопросам и доп. блоки.',\n '',\n 'ВАЖНО про гибкость:',\n '- Ищи ответы по СМЫСЛУ по всему транскрипту, а не в ожидаемом месте.',\n '- Ответ может быть рассыпан по нескольким репликам — собери воедино.',\n '- Клиент может ответить, не дожидаясь прямого вопроса — это валидный ответ.',\n '- Если есть только косвенные признаки — извлеки суть, не выдумывай.',\n '- Различай реальный ответ и тему, упомянутую вскользь без содержания (тогда пусто).',\n '',\n 'Менеджеры и руководители (наша сторона) и допустимые формы их имени: ' + managers.join('; ') + '.',\n 'КАК ОПРЕДЕЛИТЬ manager и contact_name: НАШ менеджер — тот, кто ПРОВОДИТ встречу и ЗАДАЁТ вопросы (про бизнес собеседника, удовлетворённость, развитие сотрудничества). КЛИЕНТ — тот, ЧЕЙ бизнес обсуждают и кто ОТВЕЧАЕТ. Опирайся на подсказку об участниках выше и на роли в диалоге, а не только на совпадение имени.',\n 'КОЛЛИЗИЯ ИМЁН: если КЛИЕНТА зовут так же, как кого-то из нашего списка (например, клиента тоже зовут Анна, Дмитрий, Сергей и т.п.) — он ВСЁ РАВНО КЛИЕНТ. Само совпадение имени НЕ делает участника нашим менеджером; засчитывай менеджером только того, кто реально ведёт встречу и задаёт вопросы.',\n 'В поле manager выводи каноническое полное имя менеджера (первое слово до скобок), несколько через запятую если наших несколько. Остальные участники — contact_name (через запятую). Имена не выдумывай; если не названо — пусто.',\n '',\n 'Вопросы (ключ — формулировка — цель):',\n ...QUESTIONS.map((q) => q.key + ' — ' + q.text),\n '',\n 'Дополнительно:',\n '- agreements — договорённости/next steps;',\n '- company_summary — сводка о компании клиента из диалога: чем занимается, масштаб, направления, ситуация в бизнесе;',\n '- growth_opportunities — аналитический срез про самого клиента и его бизнес: куда движется, намерения и тренды, спящий потенциал, и зоны, где МЫ могли бы вырасти ВНЕ текущих услуг (наши основные услуги: ' + OUR_SERVICES + '). Это твой вывод из контекста, а не прямая просьба клиента. НЕ дублируй сюда то, что клиент явно попросил — это идёт в q8_wishes. Помечай: сказано прямо или это твоё предположение.',\n '',\n 'Верни СТРОГО валидный JSON без markdown по схеме:',\n '{ \"is_target_meeting\": true, \"target_signal\": \"full|partial|none\", \"reason\": \"\", \"contact_name\": \"\", \"manager\": \"\", \"answers\": { ' + QUESTIONS.map((q) => '\"' + q.key + '\":\"\"').join(', ') + ' }, \"agreements\":\"\", \"company_summary\":\"\", \"growth_opportunities\":\"\" }',\n 'Если по вопросу нет ответа — пустая строка. Если встреча не целевая — is_target_meeting:false и target_signal:\"none\".'\n].join('\\n');\nconst user = 'Заголовок встречи (имя файла): ' + title + managerHint + '\\n\\nТранскрипт:\\n' + transcriptText;\nconst openaiBody = { model: 'gpt-5.4', messages: [ { role: 'system', content: system }, { role: 'user', content: user } ], response_format: { type: 'json_object' } };\nreturn [{ json: { meetingId: ($('Prep FF Query').item.json.meetingId) || '', realDateMs: realDateMs, duration: duration, fileId: fileId, managerFromFile: managerFromFile, openaiBody: openaiBody, questions: QUESTIONS.map((q) => ({ key: q.key, column: q.column })) } }];"
+      },
+      "id": "a6ad7e40-f612-4b08-b047-5f566099f223",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        912,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.openaiBody }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "d3b87d48-14de-4ad4-98c2-3b2b6c47395d",
+      "name": "Extract (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        1120,
+        544
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "OpenAI account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const resp = $input.first().json;\n// Сбой модели — это ошибка, а не «встреча не того типа»: бросаем исключение,\n// чтобы сработал общий обработчик ошибок и встреча не пропала молча.\nif (resp.error) { throw new Error('Модель вернула ошибку: ' + (resp.error.message || JSON.stringify(resp.error))); }\nif (!resp.choices || !resp.choices[0] || !resp.choices[0].message) { throw new Error('В ответе модели нет choices: ' + JSON.stringify(resp).slice(0, 300)); }\nlet content = resp.choices[0].message.content || '';\ncontent = content.replace(/```json/gi, '').replace(/```/g, '').trim();\nlet parsed = null;\ntry { parsed = JSON.parse(content); } catch (e) { throw new Error('Ответ модели не разбирается как JSON: ' + content.slice(0, 300)); }\nif (!parsed || typeof parsed.is_target_meeting !== 'boolean') { throw new Error('В ответе модели нет поля is_target_meeting: ' + content.slice(0, 300)); }\nconst bp = $('Build Prompt').item.json;\nconst isTarget = !!(parsed && parsed.is_target_meeting === true);\nconst meetingId = bp.meetingId || '';\nconst realDateMs = bp.realDateMs || 0;\nconst p = (n) => String(n).padStart(2, '0');\nlet dateStr = '';\nif (realDateMs) { try { const d = new Date(Number(realDateMs) + 3*3600*1000); dateStr = d.getUTCFullYear() + '-' + p(d.getUTCMonth()+1) + '-' + p(d.getUTCDate()); } catch (e) { dateStr = ''; } }\nlet durMin = '';\nif (bp.duration !== undefined && bp.duration !== null && bp.duration !== '') { const dv = Number(bp.duration); if (!isNaN(dv)) durMin = Math.round(dv); }\nconst a = (parsed && parsed.answers) ? parsed.answers : {};\nconst MGR = [\n {full:'Анна',    keys:['анна','аня','соколова']},\n {full:'Дмитрий', keys:['дмитрий','дима','орлов']},\n {full:'Елена',   keys:['елена','лена','белова']},\n {full:'Сергей',  keys:['сергей','сережа','новиков']},\n {full:'Наталья', keys:['наталья','наташа','кравцова']}\n];\nconst normMgr = (raw) => {\n  if (!raw) return '';\n  const out = [];\n  String(raw).split(',').forEach((part) => {\n    const words = part.toLowerCase().replace(/ё/g, 'е').split(/[^а-я]+/).filter(Boolean);\n    let canon = '';\n    for (const m of MGR) { if (m.keys.some((k) => words.includes(k))) { canon = m.full; break; } }\n    const val = canon || part.trim();\n    if (val && out.indexOf(val) === -1) out.push(val);\n  });\n  return out.join(', ');\n};\nconst manager = normMgr(bp.managerFromFile) || normMgr((parsed && parsed.manager) ? parsed.manager : '');\nreturn [{ json: {\n  isTargetMeeting: isTarget,\n  fileId: bp.fileId || '',\n  meetingId: meetingId,\n  dateStr: dateStr,\n  realDateMs: realDateMs,\n  durMin: durMin,\n  manager: manager,\n  contact_name: (parsed && parsed.contact_name) ? parsed.contact_name : '',\n  answers: a,\n  agreements: (parsed && parsed.agreements) ? parsed.agreements : '',\n  company_summary: (parsed && parsed.company_summary) ? parsed.company_summary : '',\n  growth_opportunities: (parsed && parsed.growth_opportunities) ? parsed.growth_opportunities : ''\n} }];"
+      },
+      "id": "e4c404c7-7994-4354-9cbb-3e1d6b34fec5",
+      "name": "Parse",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1344,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose",
+                  "version": 1
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.isTargetMeeting }}",
+                    "rightValue": true,
+                    "operator": {
+                      "type": "boolean",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Целевая встреча"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Другие"
+        }
+      },
+      "id": "09176788-3f7d-4297-bb1d-7c929259b315",
+      "name": "Тип встречи",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        1568,
+        544
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const pj = $('Parse').item.json;\nconst manager = pj.manager || '';\nconst realDateMs = pj.realDateMs || 0;\nconst p = (n) => String(n).padStart(2, '0');\nlet datePart = '';\nif (realDateMs) { try { const d = new Date(Number(realDateMs) + 3*3600*1000); datePart = p(d.getUTCDate()) + '-' + p(d.getUTCMonth()+1) + '-' + d.getUTCFullYear(); } catch (e) {} }\nconst base = manager ? manager : 'Без менеджера';\nlet suffix = (pj.contact_name || '').split(',')[0].trim();\nif (!suffix) { const mid = String(pj.meetingId || ''); suffix = mid ? mid.slice(-4) : ''; }\nsuffix = suffix.split('/').join('-').split(':').join('-').trim();\nlet folderName = base + ' - ' + (datePart || 'без даты');\nif (suffix) { folderName = folderName + ' - ' + suffix; }\nreturn [{ json: { folderName: folderName } }];"
+      },
+      "id": "eb8ac3e1-c687-4930-8b30-a12b6b8249a5",
+      "name": "Build Folder Name",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1792,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "folder",
+        "name": "={{ $json.folderName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_MEETINGS_FOLDER_ID"
+        },
+        "options": {}
+      },
+      "id": "46ea8c38-7c6c-4160-aa2a-22c39d66878f",
+      "name": "Create Meeting Folder",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2000,
+        448
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const pj = $('Parse').item.json;\nconst a = pj.answers || {};\nconst created = $input.first().json || {};\nconst fid = created.id || '';\nconst row = {\n  'Дата встречи': pj.dateStr || '',\n  'Клиент': '',\n  'Имя контакта': pj.contact_name || '',\n  'Менеджер': pj.manager || '',\n  'Длительность (мин)': pj.durMin,\n  ...Object.fromEntries((($('Build Prompt').item.json.questions) || []).map((q) => [q.column, a[q.key] || ''])),\n  'Договорённости / Next Steps': pj.agreements || '',\n  'О компании': pj.company_summary || '',\n  'Перспективы и зоны роста': pj.growth_opportunities || '',\n  'ID встречи (Fireflies)': pj.meetingId || '',\n  'Папка встречи': fid ? ('https://drive.google.com/drive/folders/' + fid) : ''\n};\nreturn [{ json: row }];"
+      },
+      "id": "15279b46-ece0-483a-b570-016d027e672f",
+      "name": "Build Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2224,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_GOOGLE_SHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Встречи — Сводная"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {
+          "handlingExtraData": "insertInNewColumn",
+          "useAppend": true
+        }
+      },
+      "id": "ff723b3b-1db6-41b2-b61a-80fd0e81e2f6",
+      "name": "Append Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        2448,
+        448
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const ft = $('Fetch Transcript').item.json;\nconst data = (ft.data && ft.data.transcript) ? ft.data.transcript : (ft.transcript || {});\nconst sentences = data.sentences || [];\nconst title = data.title || 'Транскрипт';\nlet text = title + '\\n\\n';\nfor (let i = 0; i < sentences.length; i++) { const s = sentences[i] || {}; text += (s.speaker_name || 'Спикер') + ': ' + (s.text || '') + '\\n'; }\nconst folderId = ($('Create Meeting Folder').item.json.id) || '';\nreturn [{ json: { transcriptText: text, transcriptName: 'Транскрипт (Fireflies).txt', folderId: folderId } }];"
+      },
+      "id": "dd2505f6-6dc2-449d-a756-b6d70c1dd8c9",
+      "name": "Build Transcript File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2672,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "createFromText",
+        "content": "={{ $json.transcriptText }}",
+        "name": "={{ $json.transcriptName }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.folderId }}"
+        },
+        "options": {}
+      },
+      "id": "537984d6-8611-47c6-9920-7ebbad94acd9",
+      "name": "Upload Transcript",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        2880,
+        448
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Parse').item.json.fileId }}"
+        },
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Create Meeting Folder').item.json.id }}"
+        }
+      },
+      "id": "16ea6740-8b0d-4477-b1b4-a3f5cc815964",
+      "name": "Move → папка встречи",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        3104,
+        448
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=✅ Drive-встреча обработана\nМенеджер: {{ $('Build Row').item.json['Менеджер'] || '—' }}\nКонтакт: {{ $('Build Row').item.json['Имя контакта'] || '—' }}\n{{ $('Build Row').item.json['Дата встречи'] }} · {{ $('Build Row').item.json['Длительность (мин)'] }} мин\nПапка: {{ $('Build Row').item.json['Папка встречи'] }}",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "19261a41-af7b-422b-8f49-8f18defa6522",
+      "name": "Telegram · обработано",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3312,
+        448
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "move",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $('Parse').item.json.fileId }}"
+        },
+        "driveId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SHARED_DRIVE_ID"
+        },
+        "folderId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_OTHER_MEETINGS_FOLDER_ID"
+        }
+      },
+      "id": "9b529889-37de-4786-a88a-19183cbe0573",
+      "name": "Move → Другие встречи",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1792,
+        672
+      ],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Drive account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=ℹ️ Drive-запись обработана — другой тип встречи\nПеремещена в «Другие встречи».",
+        "additionalFields": {
+          "appendAttribution": false,
+          "parse_mode": "HTML"
+        }
+      },
+      "id": "fc48f68a-edb3-4755-90ad-1c6825f8f032",
+      "name": "Telegram · другая встреча",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        1984,
+        672
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Каждую минуту": {
+      "main": [
+        [
+          {
+            "node": "List Inbox",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Inbox": {
+      "main": [
+        [
+          {
+            "node": "Prep Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep Upload": {
+      "main": [
+        [
+          {
+            "node": "Move → _processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move → _processing": {
+      "main": [
+        [
+          {
+            "node": "Share Public",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Share Public": {
+      "main": [
+        [
+          {
+            "node": "Fireflies Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fireflies Upload": {
+      "main": [
+        [
+          {
+            "node": "Telegram · ушло в Fireflies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fireflies Drive Webhook": {
+      "main": [
+        [
+          {
+            "node": "Prep FF Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prep FF Query": {
+      "main": [
+        [
+          {
+            "node": "Fetch Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Transcript": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Extract (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Parse",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse": {
+      "main": [
+        [
+          {
+            "node": "Тип встречи",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Тип встречи": {
+      "main": [
+        [
+          {
+            "node": "Build Folder Name",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Move → Другие встречи",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Folder Name": {
+      "main": [
+        [
+          {
+            "node": "Create Meeting Folder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Meeting Folder": {
+      "main": [
+        [
+          {
+            "node": "Build Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Row": {
+      "main": [
+        [
+          {
+            "node": "Append Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append Row": {
+      "main": [
+        [
+          {
+            "node": "Build Transcript File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Transcript File": {
+      "main": [
+        [
+          {
+            "node": "Upload Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Transcript": {
+      "main": [
+        [
+          {
+            "node": "Move → папка встречи",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move → папка встречи": {
+      "main": [
+        [
+          {
+            "node": "Telegram · обработано",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Move → Другие встречи": {
+      "main": [
+        [
+          {
+            "node": "Telegram · другая встреча",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "errorWorkflow": "YOUR_ERROR_WORKFLOW_ID"
+  },
+  "pinData": {},
+  "tags": []
+}
